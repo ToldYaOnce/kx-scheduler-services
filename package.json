@@ -1,0 +1,54 @@
+{
+  "name": "kx-scheduler-services",
+  "version": "0.1.0",
+  "description": "Kx Scheduling Engine - Multi-tenant scheduling, booking, and attendance backend",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "clean": "rm -rf lib cdk.out",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "cdk": "cdk",
+    "synth": "cdk synth",
+    "deploy": "cdk deploy",
+    "diff": "cdk diff",
+    "add:utils": "npm rm @toldyaonce/kx-cdk-lambda-utils && npm rm @toldyaonce/kx-cdk-constructs && npm i @toldyaonce/kx-cdk-constructs@latest && npm i @toldyaonce/kx-cdk-lambda-utils@latest",
+    "add:constructs": "npm rm @toldyaonce/kx-cdk-constructs && npm i @toldyaonce/kx-cdk-constructs@latest",
+    "add:events": "npm rm @toldyaonce/kx-events-cdk && npm rm @toldyaonce/kx-events-decorators && npm i @toldyaonce/kx-events-cdk@latest @toldyaonce/kx-events-decorators@latest"
+  },
+  "keywords": [
+    "aws",
+    "cdk",
+    "scheduling",
+    "booking",
+    "attendance",
+    "multi-tenant",
+    "typescript",
+    "serverless"
+  ],
+  "author": "KX Tech",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/jest": "^29.5.0",
+    "@types/node": "^20.0.0",
+    "aws-cdk": "^2.201.0",
+    "esbuild": "0.27.1",
+    "jest": "^29.5.0",
+    "ts-jest": "^29.1.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.2.0"
+  },
+  "dependencies": {
+    "@aws-sdk/lib-dynamodb": "3.943.0",
+    "@toldyaonce/kx-cdk-constructs": "1.44.0",
+    "@toldyaonce/kx-cdk-lambda-utils": "1.36.0",
+    "@toldyaonce/kx-events-cdk": "1.0.31",
+    "@toldyaonce/kx-events-decorators": "1.0.28",
+    "aws-cdk-lib": "2.201.0",
+    "constructs": "10.4.2",
+    "dotenv": "^16.3.0",
+    "rrule": "^2.7.2"
+  }
+}
