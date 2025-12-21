@@ -58,18 +58,32 @@ export class SessionsService {
         return error(400, 'Missing required params: startDate and endDate (YYYY-MM-DD)');
       }
 
-      const rangeStart = new Date(params.startDate + 'T00:00:00Z');
-      const rangeEnd = new Date(params.endDate + 'T23:59:59Z');
+      // Validate date format first
+      const testStart = new Date(params.startDate + 'T00:00:00Z');
+      const testEnd = new Date(params.endDate + 'T23:59:59Z');
 
-      if (isNaN(rangeStart.getTime()) || isNaN(rangeEnd.getTime())) {
+      if (isNaN(testStart.getTime()) || isNaN(testEnd.getTime())) {
         return error(400, 'Invalid date format. Use YYYY-MM-DD');
       }
 
       // Limit to 90 days
-      const rangeDays = (rangeEnd.getTime() - rangeStart.getTime()) / (1000 * 60 * 60 * 24);
+      const rangeDays = (testEnd.getTime() - testStart.getTime()) / (1000 * 60 * 60 * 24);
       if (rangeDays > 90) {
         return error(400, 'Date range too large. Maximum 90 days');
       }
+
+      // Extend range to cover all timezones (UTC-12 to UTC+14)
+      // This ensures we capture sessions that occur on the requested dates in ANY timezone
+      // We'll filter by actual local date after generation
+      const rangeStart = new Date(params.startDate + 'T00:00:00Z');
+      rangeStart.setUTCHours(rangeStart.getUTCHours() - 14); // Cover UTC+14
+      
+      const rangeEnd = new Date(params.endDate + 'T23:59:59Z');
+      rangeEnd.setUTCHours(rangeEnd.getUTCHours() + 12); // Cover UTC-12
+
+      // Store requested dates for filtering later
+      const requestedStartDate = params.startDate;
+      const requestedEndDate = params.endDate;
 
       // 1. Fetch schedules
       const schedulesResult = await docClient.send(new QueryCommand({
@@ -81,9 +95,15 @@ export class SessionsService {
       let schedules = (schedulesResult.Items || []) as Schedule[];
       console.log(`[SessionsService] Found ${schedules.length} schedules`);
 
-      // Filter by programId if specified
-      if (params.programId) {
-        schedules = schedules.filter(s => s.programId === params.programId);
+      // Filter by programId(s) if specified
+      // Supports both single programId and comma-delimited programIds
+      if (params.programIds || params.programId) {
+        const programIdList = params.programIds 
+          ? params.programIds.split(',').map((id: string) => id.trim())
+          : [params.programId];
+        const programIdSet = new Set(programIdList);
+        schedules = schedules.filter(s => s.programId && programIdSet.has(s.programId));
+        console.log(`[SessionsService] Filtering by ${programIdSet.size} programId(s): ${schedules.length} schedules remain`);
       }
 
       // 2. Fetch exceptions for all schedules in range
@@ -135,8 +155,14 @@ export class SessionsService {
         }
       }
 
-      // 6. Apply additional filters
-      let filtered = allSessions;
+      // 6. Filter by actual local date (since we extended the UTC range for timezone safety)
+      let filtered = allSessions.filter(session => {
+        // session.date is already in YYYY-MM-DD format in the session's timezone
+        return session.date >= requestedStartDate && session.date <= requestedEndDate;
+      });
+      console.log(`[SessionsService] After date filter (${requestedStartDate} to ${requestedEndDate}): ${filtered.length} sessions`);
+
+      // 7. Apply additional filters
       if (params.type) {
         filtered = filtered.filter(s => s.type === params.type);
       }
@@ -147,7 +173,27 @@ export class SessionsService {
         filtered = filtered.filter(s => s.locationId === params.locationId);
       }
 
-      // 7. Sort by start time
+      // 7b. Apply time-of-day filter with timezone awareness
+      // startTime/endTime are in HH:MM format, compared in the session's timezone
+      if (params.startTime || params.endTime) {
+        filtered = filtered.filter(session => {
+          // Get the session's local time in its own timezone
+          const sessionStart = new Date(session.start);
+          const localTime = sessionStart.toLocaleTimeString('en-GB', {
+            timeZone: session.timezone,
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false
+          }); // Returns "HH:MM" format (e.g., "17:00")
+          
+          if (params.startTime && localTime < params.startTime) return false;
+          if (params.endTime && localTime > params.endTime) return false;
+          return true;
+        });
+        console.log(`[SessionsService] After time filter (${params.startTime}-${params.endTime}): ${filtered.length} sessions`);
+      }
+
+      // 8. Sort by start time
       filtered.sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
 
       console.log(`[SessionsService] Returning ${filtered.length} sessions`);

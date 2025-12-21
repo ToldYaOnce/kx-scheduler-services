@@ -41,8 +41,9 @@
     "typescript": "^5.2.0"
   },
   "dependencies": {
+    "@aws-sdk/client-eventbridge": "3.943.0",
     "@aws-sdk/lib-dynamodb": "3.943.0",
-    "@toldyaonce/kx-cdk-constructs": "1.44.0",
+    "@toldyaonce/kx-cdk-constructs": "1.45.0",
     "@toldyaonce/kx-cdk-lambda-utils": "1.36.0",
     "@toldyaonce/kx-events-cdk": "1.0.31",
     "@toldyaonce/kx-events-decorators": "1.0.28",

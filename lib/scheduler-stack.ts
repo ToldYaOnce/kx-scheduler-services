@@ -2,9 +2,14 @@ import * as cdk from 'aws-cdk-lib';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as targets from 'aws-cdk-lib/aws-events-targets';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
 import { createSchedulerTables, getTableEnvVars, SchedulerTables } from './tables';
 import { attachServiceToApiGateway, LambdaOptions } from '@toldyaonce/kx-cdk-lambda-utils';
+import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
+import { LambdaPublisher } from '@toldyaonce/kx-cdk-constructs';
 // Discovery - uncomment after publishing kx-cdk-constructs@1.43.0
 // import { ApiGatewayDiscovery } from '@toldyaonce/kx-cdk-constructs';
 
@@ -122,6 +127,14 @@ export class SchedulerStack extends cdk.Stack {
     );
     this.grantTableAccess(programsLambdas, ['programs']);
 
+    // 🔍 Publish Programs Lambda ARN to SSM for cross-service discovery
+    const programsGetLambda = programsLambdas.find(l => l.methodName === 'get')?.lambda;
+    if (programsGetLambda) {
+      LambdaPublisher.publishToSSM(this, 'kx-scheduler', 'programs-get', programsGetLambda, {
+        description: 'Programs GET Lambda - returns program details (name, description, etc.)'
+      });
+    }
+
     // Locations Service: /scheduling/locations
     const locationsLambdas = attachServiceToApiGateway(
       this, api, LocationsService,
@@ -151,6 +164,14 @@ export class SchedulerStack extends cdk.Stack {
     );
     this.grantTableAccess(sessionsLambdas, ['schedules', 'scheduleExceptions', 'sessionSummaries']);
 
+    // 🔍 Publish Sessions Lambda ARN to SSM for cross-service discovery (e.g., kx-langchain-agent)
+    const sessionsGetLambda = sessionsLambdas.find(l => l.methodName === 'get')?.lambda;
+    if (sessionsGetLambda) {
+      LambdaPublisher.publishToSSM(this, 'kx-scheduler', 'sessions-get', sessionsGetLambda, {
+        description: 'Sessions GET Lambda - returns computed sessions with RRULE expansion'
+      });
+    }
+
     // Bookings Service: /scheduling/bookings
     const bookingsLambdas = attachServiceToApiGateway(
       this, api, BookingsService,
@@ -164,6 +185,82 @@ export class SchedulerStack extends cdk.Stack {
       './src/services/attendance-service.ts', lambdaOptions
     );
     this.grantTableAccess(attendanceLambdas, ['schedules', 'scheduleExceptions', 'bookings', 'attendance', 'locations']);
+
+    // =========================================================================
+    // EventBridge Subscriptions
+    // =========================================================================
+
+    console.log('📡 Setting up EventBridge subscriptions...');
+
+    // Import the shared event bus from KxGenStack
+    const eventBusArn = cdk.Fn.importValue('KxGenStack-EventBridgeArn');
+    const eventBus = events.EventBus.fromEventBusArn(this, 'KxEventBus', eventBusArn);
+    // Extract bus name from ARN for Lambda env var (ARN format: arn:aws:events:region:account:event-bus/name)
+    const eventBusName = cdk.Fn.select(1, cdk.Fn.split('event-bus/', eventBusArn));
+    console.log(`   Event Bus: imported from KxGenStack-EventBridgeArn`);
+
+    // Booking Events Handler Lambda
+    const bookingEventsHandler = new NodejsFunction(this, 'BookingEventsHandler', {
+      entry: './src/events/booking-events-handler.ts',
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_20_X,
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 512,
+      environment: {
+        ...tableEnvVars,
+        EVENT_BUS_NAME: eventBusName,  // e.g., "kx-event-tracking-dev"
+        NODE_OPTIONS: '--enable-source-maps',
+        ENVIRONMENT: environment,
+      },
+      bundling: {
+        minify: true,
+        sourceMap: true,
+      },
+    });
+
+    // Grant table access
+    this.tables.bookings.grantReadWriteData(bookingEventsHandler);
+    this.tables.schedules.grantReadData(bookingEventsHandler);
+    this.tables.scheduleExceptions.grantReadData(bookingEventsHandler);
+    this.tables.sessionSummaries.grantReadWriteData(bookingEventsHandler);
+
+    // Grant permission to put events back to the bus
+    bookingEventsHandler.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['events:PutEvents'],
+      resources: [eventBus.eventBusArn],
+    }));
+
+    // EventBridge Rule: scheduling.booking_requested
+    new events.Rule(this, 'BookingRequestedRule', {
+      eventBus,
+      ruleName: `kx-scheduler-booking-requested-${environment}`,
+      description: 'Route scheduling.booking_requested events to Scheduler service',
+      eventPattern: {
+        source: ['kxgen.agent'],
+        detailType: ['scheduling.booking_requested'],
+      },
+      targets: [new targets.LambdaFunction(bookingEventsHandler, {
+        retryAttempts: 2,
+      })],
+    });
+
+    console.log('   ✅ Subscribed to: scheduling.booking_requested');
+
+    // EventBridge Rule: appointment.consultation_requested
+    new events.Rule(this, 'ConsultationRequestedRule', {
+      eventBus,
+      ruleName: `kx-scheduler-consultation-requested-${environment}`,
+      description: 'Route appointment.consultation_requested events to Scheduler service',
+      eventPattern: {
+        source: ['kxgen.agent.goals'],
+        detailType: ['appointment.consultation_requested'],
+      },
+      targets: [new targets.LambdaFunction(bookingEventsHandler, {
+        retryAttempts: 2,
+      })],
+    });
+
+    console.log('   ✅ Subscribed to: appointment.consultation_requested');
 
     // =========================================================================
     // Stack Outputs

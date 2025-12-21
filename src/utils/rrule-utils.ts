@@ -58,15 +58,137 @@ export function getDurationMinutes(start: string, end: string): number {
 }
 
 /**
- * Apply time from source date to target date
+ * Extract local time components from a datetime string
+ * Returns the time portion as-is, stripping any timezone info
+ * 
+ * Examples:
+ * - "2025-12-11T19:00:00-05:00" → { hours: 19, minutes: 0, seconds: 0 }
+ * - "2025-12-11T09:30:00" → { hours: 9, minutes: 30, seconds: 0 }
+ * - "2025-12-11T14:00:00Z" → { hours: 14, minutes: 0, seconds: 0 }
  */
-function applyTimeToDate(targetDate: Date, sourceDateTime: Date): Date {
-  const result = new Date(targetDate);
-  result.setHours(sourceDateTime.getHours());
-  result.setMinutes(sourceDateTime.getMinutes());
-  result.setSeconds(sourceDateTime.getSeconds());
-  result.setMilliseconds(sourceDateTime.getMilliseconds());
-  return result;
+function extractLocalTimeComponents(dateTimeStr: string): { hours: number; minutes: number; seconds: number } {
+  // Match the time portion: HH:MM:SS (ignoring timezone suffix)
+  const timeMatch = dateTimeStr.match(/T(\d{2}):(\d{2}):(\d{2})/);
+  if (!timeMatch) {
+    return { hours: 0, minutes: 0, seconds: 0 };
+  }
+  return {
+    hours: parseInt(timeMatch[1], 10),
+    minutes: parseInt(timeMatch[2], 10),
+    seconds: parseInt(timeMatch[3], 10),
+  };
+}
+
+/**
+ * Extract local date components from a datetime string
+ * Returns the date portion as-is, stripping any timezone info
+ */
+function extractLocalDateComponents(dateTimeStr: string): { year: number; month: number; day: number } {
+  // Match the date portion: YYYY-MM-DD
+  const dateMatch = dateTimeStr.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!dateMatch) {
+    return { year: 2025, month: 1, day: 1 };
+  }
+  return {
+    year: parseInt(dateMatch[1], 10),
+    month: parseInt(dateMatch[2], 10),
+    day: parseInt(dateMatch[3], 10),
+  };
+}
+
+/**
+ * Convert a UTC Date to "naive local" Date in a specific timezone
+ * The returned Date has UTC values that match the local wall-clock time
+ * 
+ * Example: convertUtcToNaiveLocal(Dec 12 05:00Z, "America/New_York")
+ *          → Dec 12 00:00Z (because 05:00 UTC = 00:00 EST, we want the "00:00" part as UTC)
+ */
+function convertUtcToNaiveLocal(utcDate: Date, timezone: string): Date {
+  // Format the UTC date in the target timezone to get local components
+  const localString = utcDate.toLocaleString('en-US', { 
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  });
+  
+  // Parse: "12/11/2025, 19:00:00" → create a Date treating these as UTC values
+  const [datePart, timePart] = localString.split(', ');
+  const [month, day, year] = datePart.split('/').map(Number);
+  const [hours, minutes, seconds] = timePart.split(':').map(Number);
+  
+  return new Date(Date.UTC(year, month - 1, day, hours, minutes, seconds));
+}
+
+/**
+ * Convert a "naive local" Date back to actual UTC in a specific timezone
+ * The input Date has UTC values that represent local wall-clock time
+ * 
+ * Example: convertNaiveLocalToUtc(Dec 11 19:00Z, "America/New_York")
+ *          → Dec 12 00:00Z (because 19:00 local EST = 00:00 UTC next day)
+ */
+function convertNaiveLocalToUtc(naiveDate: Date, timezone: string): Date {
+  // Extract the "local" time from the naive date's UTC values
+  const year = naiveDate.getUTCFullYear();
+  const month = naiveDate.getUTCMonth();
+  const day = naiveDate.getUTCDate();
+  const hours = naiveDate.getUTCHours();
+  const minutes = naiveDate.getUTCMinutes();
+  const seconds = naiveDate.getUTCSeconds();
+  
+  // Create an ISO string representing this local time (without timezone)
+  const localIso = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}T${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  
+  // Use parseLocalDateTime to convert to actual UTC
+  return parseLocalDateTime(localIso, timezone);
+}
+
+/**
+ * Parse a local datetime string in a specific timezone and return UTC Date
+ * 
+ * Example: parseLocalDateTime("2025-12-07T09:00:00", "America/New_York")
+ * Returns: Date representing 2025-12-07T14:00:00Z (9am EST = 2pm UTC)
+ * 
+ * Handles multiple formats:
+ * - "2025-12-07T09:00:00" (local datetime, needs timezone context)
+ * - "2025-12-07T14:00:00Z" (already UTC)
+ * - "2025-12-07T09:00:00-05:00" (ISO8601 with offset, already absolute)
+ * 
+ * @param localDateTime - ISO datetime string
+ * @param timezone - IANA timezone, e.g. "America/New_York" (used only for naive datetimes)
+ * @returns Date object representing the correct UTC moment
+ */
+export function parseLocalDateTime(localDateTime: string, timezone: string): Date {
+  // If already has Z suffix, it's already UTC - just parse directly
+  if (localDateTime.endsWith('Z')) {
+    return new Date(localDateTime);
+  }
+
+  // Check if the string already has a timezone offset (e.g., -05:00, +00:00)
+  // ISO8601 offset format: ±HH:MM or ±HHMM at the end
+  const offsetRegex = /[+-]\d{2}:?\d{2}$/;
+  if (offsetRegex.test(localDateTime)) {
+    // Already has offset info - parse directly (JavaScript handles this correctly)
+    return new Date(localDateTime);
+  }
+
+  // No timezone info - treat as local datetime in the specified timezone
+  // Parse as UTC temporarily to extract the date/time values
+  const asUtc = new Date(localDateTime + 'Z');
+  
+  // Format this UTC moment in both UTC and target timezone
+  const utcString = asUtc.toLocaleString('en-US', { timeZone: 'UTC' });
+  const tzString = asUtc.toLocaleString('en-US', { timeZone: timezone });
+  
+  // Calculate offset (how much to add to convert from timezone to UTC)
+  const offsetMs = new Date(utcString).getTime() - new Date(tzString).getTime();
+  
+  // Apply offset: we want "9am in timezone" → correct UTC
+  return new Date(asUtc.getTime() + offsetMs);
 }
 
 /**
@@ -74,6 +196,11 @@ function applyTimeToDate(targetDate: Date, sourceDateTime: Date): Date {
  * 
  * For non-recurring schedules, returns a single session if within range.
  * For recurring schedules, expands the RRULE and generates sessions.
+ * 
+ * IMPORTANT: RRULE expansion happens in "naive local time" context to ensure
+ * that BYDAY (Mon, Tue, etc.) matches the user's local timezone weekdays,
+ * not UTC weekdays. This is critical for evening sessions that cross the
+ * UTC day boundary (e.g., 7PM EST = midnight UTC next day).
  * 
  * @param schedule - The schedule to generate sessions from
  * @param options - Generation options (date range, exceptions, summaries)
@@ -92,23 +219,46 @@ export function generateSessions(
     exceptionMap.set(exc.occurrenceDate, exc);
   }
 
-  // Calculate duration for applying to each occurrence
-  const startDate = new Date(schedule.start);
-  const endDate = new Date(schedule.end);
-  const durationMs = endDate.getTime() - startDate.getTime();
+  // Extract local time components from schedule (the wall-clock time in user's timezone)
+  const localTimeComponents = extractLocalTimeComponents(schedule.start);
+  const localDateComponents = extractLocalDateComponents(schedule.start);
+  
+  // Calculate duration from the original schedule times
+  const startDateUtc = parseLocalDateTime(schedule.start, schedule.timezone);
+  const endDateUtc = parseLocalDateTime(schedule.end, schedule.timezone);
+  const durationMs = endDateUtc.getTime() - startDateUtc.getTime();
 
-  let occurrenceDates: Date[] = [];
+  // For RRULE expansion, we need to work in "naive local time" context
+  // This ensures BYDAY matches local weekdays, not UTC weekdays
+  
+  // Create naive dtstart: the local date/time treated as if it were UTC
+  const naiveDtstart = new Date(Date.UTC(
+    localDateComponents.year,
+    localDateComponents.month - 1,
+    localDateComponents.day,
+    localTimeComponents.hours,
+    localTimeComponents.minutes,
+    localTimeComponents.seconds
+  ));
+
+  // Convert query range to naive local time in the schedule's timezone
+  const naiveRangeStart = convertUtcToNaiveLocal(rangeStart, schedule.timezone);
+  const naiveRangeEnd = convertUtcToNaiveLocal(rangeEnd, schedule.timezone);
+
+  let naiveOccurrences: Date[] = [];
 
   if (!schedule.isRecurring || !schedule.rrule) {
-    // Non-recurring: just check if the single date is in range
-    if (startDate >= rangeStart && startDate <= rangeEnd) {
-      occurrenceDates = [startDate];
+    // Non-recurring: check if the single occurrence is in range
+    // For non-recurring, compare the actual UTC times
+    if (startDateUtc >= rangeStart && startDateUtc <= rangeEnd) {
+      // Return the naive occurrence for consistent processing below
+      naiveOccurrences = [naiveDtstart];
     }
   } else {
-    // Recurring: expand RRULE
+    // Recurring: expand RRULE in naive local time context
     try {
-      const rule = rrulestr(schedule.rrule, { dtstart: startDate });
-      occurrenceDates = rule.between(rangeStart, rangeEnd, true);
+      const rule = rrulestr(schedule.rrule, { dtstart: naiveDtstart });
+      naiveOccurrences = rule.between(naiveRangeStart, naiveRangeEnd, true);
     } catch (error) {
       console.error(`[rrule-utils] Failed to parse RRULE for schedule ${schedule.scheduleId}:`, error);
       return sessions;
@@ -116,8 +266,14 @@ export function generateSessions(
   }
 
   // Generate sessions for each occurrence
-  for (const occurrenceDate of occurrenceDates) {
-    const dateStr = formatDateLocal(occurrenceDate, schedule.timezone);
+  for (const naiveOccurrence of naiveOccurrences) {
+    // The naive occurrence has the correct local date/time as UTC values
+    // Extract the local date string directly from the naive occurrence
+    const year = naiveOccurrence.getUTCFullYear();
+    const month = String(naiveOccurrence.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(naiveOccurrence.getUTCDate()).padStart(2, '0');
+    const dateStr = `${year}-${month}-${day}`;
+    
     const exception = exceptionMap.get(dateStr);
 
     // Skip cancelled sessions
@@ -125,7 +281,7 @@ export function generateSessions(
       continue;
     }
 
-    // Calculate session times
+    // Calculate session times by converting naive local back to actual UTC
     let sessionStart: Date;
     let sessionEnd: Date;
     let sessionHosts = schedule.hosts;
@@ -133,19 +289,19 @@ export function generateSessions(
     let sessionCapacity = schedule.baseCapacity;
 
     if (exception?.type === 'OVERRIDE') {
-      // Apply overrides
+      // Apply overrides (parse override times in schedule's timezone)
       sessionStart = exception.overrideStart 
-        ? new Date(exception.overrideStart) 
-        : applyTimeToDate(occurrenceDate, startDate);
+        ? parseLocalDateTime(exception.overrideStart, schedule.timezone)
+        : convertNaiveLocalToUtc(naiveOccurrence, schedule.timezone);
       sessionEnd = exception.overrideEnd
-        ? new Date(exception.overrideEnd)
+        ? parseLocalDateTime(exception.overrideEnd, schedule.timezone)
         : new Date(sessionStart.getTime() + durationMs);
       sessionHosts = exception.overrideHosts || sessionHosts;
       sessionLocationId = exception.overrideLocationId || sessionLocationId;
       sessionCapacity = exception.overrideCapacity ?? sessionCapacity;
     } else {
-      // Normal occurrence - apply original time to occurrence date
-      sessionStart = applyTimeToDate(occurrenceDate, startDate);
+      // Normal occurrence - convert naive local to actual UTC
+      sessionStart = convertNaiveLocalToUtc(naiveOccurrence, schedule.timezone);
       sessionEnd = new Date(sessionStart.getTime() + durationMs);
     }
 
@@ -261,16 +417,38 @@ export function createRRule(params: {
 
 /**
  * Get the next occurrence of a schedule after a given date
+ * Uses timezone-aware RRULE expansion
  */
 export function getNextOccurrence(schedule: Schedule, after: Date = new Date()): Date | null {
   if (!schedule.isRecurring || !schedule.rrule) {
-    const startDate = new Date(schedule.start);
+    const startDate = parseLocalDateTime(schedule.start, schedule.timezone);
     return startDate > after ? startDate : null;
   }
 
   try {
-    const rule = rrulestr(schedule.rrule, { dtstart: new Date(schedule.start) });
-    return rule.after(after, false);
+    // Extract local time/date components for naive expansion
+    const localTimeComponents = extractLocalTimeComponents(schedule.start);
+    const localDateComponents = extractLocalDateComponents(schedule.start);
+    
+    const naiveDtstart = new Date(Date.UTC(
+      localDateComponents.year,
+      localDateComponents.month - 1,
+      localDateComponents.day,
+      localTimeComponents.hours,
+      localTimeComponents.minutes,
+      localTimeComponents.seconds
+    ));
+    
+    // Convert "after" to naive local time
+    const naiveAfter = convertUtcToNaiveLocal(after, schedule.timezone);
+    
+    const rule = rrulestr(schedule.rrule, { dtstart: naiveDtstart });
+    const naiveNext = rule.after(naiveAfter, false);
+    
+    if (!naiveNext) return null;
+    
+    // Convert back to actual UTC
+    return convertNaiveLocalToUtc(naiveNext, schedule.timezone);
   } catch {
     return null;
   }

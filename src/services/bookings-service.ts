@@ -160,7 +160,7 @@ export class BookingsService {
         },
       ];
 
-      // Add capacity check if there's a capacity limit
+      // Add capacity check - always sync capacity from schedule to handle updates
       if (sessionInfo.capacity !== undefined && sessionInfo.capacity !== null) {
         transactItems.push({
           Update: {
@@ -168,10 +168,10 @@ export class BookingsService {
             Key: { tenantId, sessionId: body.sessionId },
             UpdateExpression: `
               SET bookedCount = if_not_exists(bookedCount, :zero) + :one,
-                  #cap = if_not_exists(#cap, :capacity),
+                  #cap = :capacity,
                   updatedAt = :now
             `,
-            ConditionExpression: 'attribute_not_exists(bookedCount) OR bookedCount < #cap',
+            ConditionExpression: 'attribute_not_exists(bookedCount) OR (bookedCount < :capacity)',
             ExpressionAttributeNames: { '#cap': 'capacity' },
             ExpressionAttributeValues: {
               ':zero': 0,
