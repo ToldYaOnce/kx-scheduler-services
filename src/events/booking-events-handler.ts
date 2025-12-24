@@ -127,7 +127,18 @@ interface BookingResultPayload {
 export async function handleBookingRequested(
   event: EventBridgeEvent<'scheduling.booking_requested', BookingRequestedPayload>
 ): Promise<void> {
-  console.log('[BookingEventsHandler] Received booking_requested event:', JSON.stringify(event));
+  const receivedAt = Date.now();
+  const correlationId = event.id || generateId('corr');
+  
+  console.log('[BookingEventsHandler] TIMING_START', JSON.stringify({
+    correlationId,
+    eventType: 'booking_requested',
+    receivedAt: new Date(receivedAt).toISOString(),
+    eventTime: event.time,
+    eventId: event.id,
+    subjectId: event.detail?.subjectId,
+    sessionId: event.detail?.schedulingData?.sessionId,
+  }));
 
   const payload = event.detail;
   const { tenantId, subjectId, channelId, schedulingData } = payload;
@@ -146,13 +157,20 @@ export async function handleBookingRequested(
       subjectId: subjectId || 'unknown',
       status: 'FAILED',
       error: 'Missing required fields: tenantId, schedulingData.sessionId, and subjectId are required',
-    });
+    }, correlationId, receivedAt);
     return;
   }
 
   try {
     // 1. Validate session exists and get capacity info
+    const getSessionStart = Date.now();
     const sessionInfo = await getSessionInfo(tenantId, sessionId);
+    console.log('[BookingEventsHandler] TIMING_STEP', JSON.stringify({
+      correlationId,
+      step: 'getSessionInfo',
+      durationMs: Date.now() - getSessionStart,
+    }));
+    
     if (!sessionInfo) {
       await emitBookingResult({
         tenantId,
@@ -163,12 +181,19 @@ export async function handleBookingRequested(
         goalId: payload.goalId,
         status: 'FAILED',
         error: 'Session not found or has been cancelled',
-      });
+      }, correlationId, receivedAt);
       return;
     }
 
     // 2. Check for existing booking
+    const checkBookingStart = Date.now();
     const existingBooking = await findExistingBooking(tenantId, sessionId, subjectId);
+    console.log('[BookingEventsHandler] TIMING_STEP', JSON.stringify({
+      correlationId,
+      step: 'findExistingBooking',
+      durationMs: Date.now() - checkBookingStart,
+    }));
+    
     if (existingBooking && existingBooking.status === 'CONFIRMED') {
       await emitBookingResult({
         tenantId,
@@ -180,7 +205,7 @@ export async function handleBookingRequested(
         status: 'CONFIRMED',
         sessionDetails: sessionInfo.details,
         // Note: Already had a booking, but we return success with existing bookingId
-      });
+      }, correlationId, receivedAt);
       return;
     }
 
@@ -263,8 +288,14 @@ export async function handleBookingRequested(
       });
     }
 
+    const transactStart = Date.now();
     await docClient.send(new TransactWriteCommand({ TransactItems: transactItems }));
-    console.log('[BookingEventsHandler] Created booking:', bookingId);
+    console.log('[BookingEventsHandler] TIMING_STEP', JSON.stringify({
+      correlationId,
+      step: 'transactWrite',
+      durationMs: Date.now() - transactStart,
+      bookingId,
+    }));
 
     // 4. Emit success event
     await emitBookingResult({
@@ -276,7 +307,7 @@ export async function handleBookingRequested(
       goalId: payload.goalId,
       status: 'CONFIRMED',
       sessionDetails: sessionInfo.details,
-    });
+    }, correlationId, receivedAt);
 
   } catch (err: any) {
     console.error('[BookingEventsHandler] Error creating booking:', err);
@@ -295,7 +326,7 @@ export async function handleBookingRequested(
       goalId: payload.goalId,
       status: 'FAILED',
       error: errorMessage,
-    });
+    }, correlationId, receivedAt);
   }
 }
 
@@ -387,12 +418,15 @@ async function findExistingBooking(
 /**
  * Emit booking result event
  */
-async function emitBookingResult(payload: BookingResultPayload): Promise<void> {
+async function emitBookingResult(
+  payload: BookingResultPayload,
+  correlationId?: string,
+  receivedAt?: number
+): Promise<void> {
+  const emitStart = Date.now();
   const detailType = payload.status === 'CONFIRMED' 
     ? 'scheduling.booking_confirmed' 
     : 'scheduling.booking_failed';
-
-  console.log(`[BookingEventsHandler] Emitting ${detailType}:`, JSON.stringify(payload));
 
   try {
     await eventBridge.send(new PutEventsCommand({
@@ -404,6 +438,21 @@ async function emitBookingResult(payload: BookingResultPayload): Promise<void> {
           Detail: JSON.stringify(payload),
         },
       ],
+    }));
+    
+    const completedAt = Date.now();
+    console.log('[BookingEventsHandler] TIMING_END', JSON.stringify({
+      correlationId,
+      status: payload.status,
+      detailType,
+      bookingId: payload.bookingId || undefined,
+      error: payload.error || undefined,
+      receivedAt: receivedAt ? new Date(receivedAt).toISOString() : undefined,
+      completedAt: new Date(completedAt).toISOString(),
+      totalDurationMs: receivedAt ? completedAt - receivedAt : undefined,
+      emitDurationMs: completedAt - emitStart,
+      sessionId: payload.sessionId,
+      subjectId: payload.subjectId,
     }));
   } catch (err) {
     console.error('[BookingEventsHandler] Failed to emit event:', err);
@@ -418,7 +467,18 @@ async function emitBookingResult(payload: BookingResultPayload): Promise<void> {
 export async function handleConsultationRequested(
   event: EventBridgeEvent<'appointment.consultation_requested', ConsultationRequestedPayload>
 ): Promise<void> {
-  console.log('[BookingEventsHandler] Received consultation_requested event:', JSON.stringify(event));
+  const receivedAt = Date.now();
+  // Use event ID as correlation ID, or generate one if not available
+  const correlationId = event.id || generateId('corr');
+  
+  console.log('[BookingEventsHandler] TIMING_START', JSON.stringify({
+    correlationId,
+    receivedAt: new Date(receivedAt).toISOString(),
+    eventTime: event.time,
+    eventId: event.id,
+    leadId: event.detail?.leadId,
+    sessionId: event.detail?.schedulingData?.sessionId,
+  }));
 
   const payload = event.detail;
   const { tenantId, leadId, channelId, schedulingData, goalId } = payload;
@@ -430,23 +490,37 @@ export async function handleConsultationRequested(
   // Validate required fields
   if (!tenantId || !sessionId || !subjectId) {
     console.error('[BookingEventsHandler] Missing required fields:', { tenantId, sessionId, subjectId });
-    await emitAppointmentResult(payload, '', 'FAILED', 'Missing required fields: tenantId, schedulingData.sessionId, and leadId are required');
+    await emitAppointmentResult(payload, '', 'FAILED', 'Missing required fields: tenantId, schedulingData.sessionId, and leadId are required', undefined, correlationId, receivedAt);
     return;
   }
 
   try {
     // 1. Validate session exists and get capacity info
+    const getSessionStart = Date.now();
     const sessionInfo = await getSessionInfo(tenantId, sessionId);
+    console.log('[BookingEventsHandler] TIMING_STEP', JSON.stringify({
+      correlationId,
+      step: 'getSessionInfo',
+      durationMs: Date.now() - getSessionStart,
+    }));
+    
     if (!sessionInfo) {
-      await emitAppointmentResult(payload, '', 'FAILED', 'Session not found or has been cancelled');
+      await emitAppointmentResult(payload, '', 'FAILED', 'Session not found or has been cancelled', undefined, correlationId, receivedAt);
       return;
     }
 
     // 2. Check for existing booking
+    const checkBookingStart = Date.now();
     const existingBooking = await findExistingBooking(tenantId, sessionId, subjectId);
+    console.log('[BookingEventsHandler] TIMING_STEP', JSON.stringify({
+      correlationId,
+      step: 'findExistingBooking',
+      durationMs: Date.now() - checkBookingStart,
+    }));
+    
     if (existingBooking && existingBooking.status === 'CONFIRMED') {
       // Already booked - emit success with existing bookingId
-      await emitAppointmentResult(payload, existingBooking.bookingId, 'CONFIRMED', undefined, sessionInfo.details);
+      await emitAppointmentResult(payload, existingBooking.bookingId, 'CONFIRMED', undefined, sessionInfo.details, correlationId, receivedAt);
       return;
     }
 
@@ -526,11 +600,17 @@ export async function handleConsultationRequested(
       });
     }
 
+    const transactStart = Date.now();
     await docClient.send(new TransactWriteCommand({ TransactItems: transactItems }));
-    console.log('[BookingEventsHandler] Created consultation booking:', bookingId);
+    console.log('[BookingEventsHandler] TIMING_STEP', JSON.stringify({
+      correlationId,
+      step: 'transactWrite',
+      durationMs: Date.now() - transactStart,
+      bookingId,
+    }));
 
     // 4. Emit success event
-    await emitAppointmentResult(payload, bookingId, 'CONFIRMED', undefined, sessionInfo.details);
+    await emitAppointmentResult(payload, bookingId, 'CONFIRMED', undefined, sessionInfo.details, correlationId, receivedAt);
 
   } catch (err: any) {
     console.error('[BookingEventsHandler] Error creating consultation booking:', err);
@@ -540,7 +620,7 @@ export async function handleConsultationRequested(
       errorMessage = 'Session is at capacity';
     }
 
-    await emitAppointmentResult(payload, '', 'FAILED', errorMessage);
+    await emitAppointmentResult(payload, '', 'FAILED', errorMessage, undefined, correlationId, receivedAt);
   }
 }
 
@@ -553,8 +633,11 @@ async function emitAppointmentResult(
   bookingId: string,
   status: 'CONFIRMED' | 'FAILED',
   error?: string,
-  sessionDetails?: BookingResultPayload['sessionDetails']
+  sessionDetails?: BookingResultPayload['sessionDetails'],
+  correlationId?: string,
+  receivedAt?: number
 ): Promise<void> {
+  const emitStart = Date.now();
   const detailType = status === 'CONFIRMED' 
     ? 'appointment.scheduled' 
     : 'appointment.failed';
@@ -568,8 +651,6 @@ async function emitAppointmentResult(
     ...(sessionDetails && { sessionDetails }),
   };
 
-  console.log(`[BookingEventsHandler] Emitting ${detailType}:`, JSON.stringify(resultPayload));
-
   try {
     await eventBridge.send(new PutEventsCommand({
       Entries: [
@@ -580,6 +661,21 @@ async function emitAppointmentResult(
           Detail: JSON.stringify(resultPayload),
         },
       ],
+    }));
+    
+    const completedAt = Date.now();
+    console.log('[BookingEventsHandler] TIMING_END', JSON.stringify({
+      correlationId,
+      status,
+      detailType,
+      bookingId: bookingId || undefined,
+      error: error || undefined,
+      receivedAt: receivedAt ? new Date(receivedAt).toISOString() : undefined,
+      completedAt: new Date(completedAt).toISOString(),
+      totalDurationMs: receivedAt ? completedAt - receivedAt : undefined,
+      emitDurationMs: completedAt - emitStart,
+      leadId: originalPayload.leadId,
+      sessionId: originalPayload.schedulingData?.sessionId,
     }));
   } catch (err) {
     console.error('[BookingEventsHandler] Failed to emit appointment event:', err);
